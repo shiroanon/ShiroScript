@@ -9,7 +9,7 @@ import argparse
 from typing import Dict, Any, List, Optional, Tuple, Set
 
 # --- Configuration ---
-DEFAULT_SHIROUI_URL = "https://adfcecda118f98d42ab6b1a5c1ed45e6.loophole.site" # Default ComfyUI/ShiroUI port
+DEFAULT_SHIROUI_URL = "127.0.0.1:8188" # Default ComfyUI/ShiroUI port
 
 # --- Node Info Fetching ---
 def fetch_nodes_info(shiro_url: str) -> Optional[Dict[str, Any]]:
@@ -237,8 +237,19 @@ class ShiroDirectParser:
             # line_idx is already updated correctly above
 
         return self._json_nodes
+def parse_code_str(url:str, shiro_code:str )->Dict[str, Any]:
+    nodes_info=fetch_nodes_info(url)
+    if not nodes_info: sys.exit(1)
 
-
+    print("Parsing .shiro file...", file=sys.stderr)
+    try:
+        shiro_parser = ShiroDirectParser(nodes_info)
+        generated_json = shiro_parser.parse(shiro_code)
+        print("Parsing successful.", file=sys.stderr)
+        return generated_json
+    except ShiroParserError as e: print(f"\nParsing Error: {e}", file=sys.stderr); sys.exit(1)
+    except Exception as e: print(f"\nAn unexpected error occurred during parsing:", file=sys.stderr); traceback.print_exc(file=sys.stderr); sys.exit(1)
+    
 # --- Main Execution Logic ---
 def main():
     parser = argparse.ArgumentParser(description="Parse a .shiro workflow file into ShiroUI/ComfyUI JSON.")
