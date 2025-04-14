@@ -9,7 +9,7 @@ import argparse
 from typing import Dict, Any, List, Optional, Tuple, Set
 
 # --- Configuration ---
-DEFAULT_SHIROUI_URL = "127.0.0.1:8188" # Default ComfyUI/ShiroUI port
+DEFAULT_SHIROUI_URL = "https://359b94cb65d4e8c57a5472c2980d25e9.loophole.site" # Default ComfyUI/ShiroUI port
 
 # --- Node Info Fetching ---
 def fetch_nodes_info(shiro_url: str) -> Optional[Dict[str, Any]]:
