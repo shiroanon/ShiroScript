@@ -11,29 +11,157 @@ from typing import Dict, Any, List, Optional, Tuple, Set
 # --- Configuration ---
 DEFAULT_SHIROUI_URL = "https://359b94cb65d4e8c57a5472c2980d25e9.loophole.site" # Default ComfyUI/ShiroUI port
 
-# --- Node Info Fetching ---
+# --- Node Info Fetching ---# --- Node Info Fetching (Identical to the original script) ---
+
+import time
+import logging
+from urllib.parse import urljoin
+
+# --- Configuration ---
+
+# Configure logging (you might want to adjust this in a larger application)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(module)s - %(message)s',
+    stream=sys.stderr  # Log to stderr like the original print statements
+)
+logger = logging.getLogger(__name__)
+
+# Retry settings
+MAX_RETRIES = 3  # Number of retries after the initial attempt
+INITIAL_BACKOFF_SECONDS = 1.0  # Initial delay before the first retry
+REQUEST_TIMEOUT_SECONDS = 15  # Timeout for each individual request attempt
+
+# --- Helper Function (Optional but good practice) ---
+
+def _is_retryable_error(exception: Exception) -> bool:
+    """Checks if an exception indicates a potentially transient error worth retrying."""
+    if isinstance(exception, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+        return True
+    if isinstance(exception, requests.exceptions.HTTPError):
+        # Retry on server errors (5xx), but not client errors (4xx)
+        return 500 <= exception.response.status_code < 600
+    # Could potentially add other specific transient errors if needed
+    # For example, some RequestException subtypes might be retryable
+    # if isinstance(exception, requests.exceptions.ChunkedEncodingError):
+    #     return True
+    return False
+
+# --- Main Function ---
+
 def fetch_nodes_info(shiro_url: str) -> Optional[Dict[str, Any]]:
-    """Fetches node schema information from the RUNNING ShiroUI backend."""
-    object_info_url = f"{shiro_url.rstrip('/')}/object_info"
-    print(f"Fetching node info from: {object_info_url} ...", file=sys.stderr)
+    """
+    Fetches node schema information from the RUNNING ShiroUI backend with retries.
+
+    Args:
+        shiro_url: The base URL of the ShiroUI/ComfyUI backend (e.g., "http://127.0.0.1:8188").
+
+    Returns:
+        A dictionary containing the node information if successful, otherwise None.
+    """
+    # 1. Normalize and validate URL
+    if not isinstance(shiro_url, str) or not shiro_url.strip():
+        logger.error("Invalid ShiroUI URL provided: URL must be a non-empty string.")
+        return None
+
+    original_url = shiro_url
+    if not shiro_url.startswith(("http://", "https://")):
+        shiro_url = f"http://{shiro_url}"
+        logger.warning(f"URL scheme missing for '{original_url}', assuming http://. Using: {shiro_url}")
+
+    # Ensure trailing slash for urljoin robustness
+    if not shiro_url.endswith('/'):
+        shiro_url += '/'
+
     try:
-        response = requests.get(object_info_url, timeout=15)
-        response.raise_for_status()  # Raise HTTPError for bad responses
-        print("Successfully fetched node info.", file=sys.stderr)
-        return response.json()
-    except requests.exceptions.Timeout:
-        print(f"Error: Timeout connecting to {object_info_url}", file=sys.stderr)
-    except requests.exceptions.ConnectionError:
-        print(f"Error: Could not connect to ShiroUI at {shiro_url}. Is it running?", file=sys.stderr)
-    except requests.exceptions.HTTPError as e:
-        print(f"Error: HTTP Error {e.response.status_code} fetching node info.", file=sys.stderr)
-        try: print("Response body:", e.response.text, file=sys.stderr)
-        except Exception: pass
-    except json.JSONDecodeError:
-        print(f"Error: Could not decode JSON response from {object_info_url}", file=sys.stderr)
-    except Exception as e:
-        print(f"An unexpected error occurred while fetching node info: {e}", file=sys.stderr)
-        traceback.print_exc(file=sys.stderr)
+        # Use urljoin for safer path combination
+        object_info_url = urljoin(shiro_url, "object_info")
+    except ValueError as e:
+        logger.error(f"Invalid base URL format '{shiro_url}': {e}")
+        return None
+
+    logger.info(f"Attempting to fetch node info from: {object_info_url}")
+
+    current_delay = INITIAL_BACKOFF_SECONDS
+    last_exception: Optional[Exception] = None
+
+    # Use a session for potential connection reuse and configuration
+    with requests.Session() as session:
+        for attempt in range(MAX_RETRIES + 1): # Initial attempt + MAX_RETRIES
+            is_last_attempt = (attempt == MAX_RETRIES)
+            log_prefix = f"Attempt {attempt + 1}/{MAX_RETRIES + 1}"
+
+            try:
+                response = session.get(object_info_url, timeout=REQUEST_TIMEOUT_SECONDS)
+                response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+
+                # Success path
+                data = response.json()
+                logger.info(f"{log_prefix}: Successfully fetched and decoded node info.")
+                return data
+
+            except requests.exceptions.Timeout as e:
+                logger.warning(f"{log_prefix}: Timeout connecting to {object_info_url} after {REQUEST_TIMEOUT_SECONDS}s.")
+                last_exception = e
+                if is_last_attempt or not _is_retryable_error(e): break
+
+            except requests.exceptions.ConnectionError as e:
+                logger.warning(f"{log_prefix}: Connection error to {shiro_url}. Is it running? Details: {e}")
+                last_exception = e
+                if is_last_attempt or not _is_retryable_error(e): break
+
+            except requests.exceptions.HTTPError as e:
+                if _is_retryable_error(e):
+                    logger.warning(f"{log_prefix}: Received server error ({e.response.status_code}) from {object_info_url}. Retrying...")
+                    last_exception = e
+                    # Fall through to retry delay if not last attempt
+                else:
+                    # Non-retryable HTTP error (e.g., 404 Not Found, 401 Unauthorized)
+                    logger.error(f"{log_prefix}: HTTP Client Error: {e.response.status_code} fetching from {object_info_url}.")
+                    try:
+                        logger.error(f"Response body: {e.response.text}")
+                    except Exception: pass # Avoid errors if text isn't available/decodable
+                    return None # Definite failure, do not retry
+
+                if is_last_attempt: break # Exit loop after logging warning/error
+
+            except requests.exceptions.RequestException as e:
+                # Catch other potential request exceptions
+                logger.warning(f"{log_prefix}: Network request failed: {e}")
+                last_exception = e
+                # Decide if generic RequestExceptions are retryable (can be broad)
+                # Let's retry them by default unless it's the last attempt
+                if is_last_attempt: break
+
+            except json.JSONDecodeError as e:
+                # Server responded, but with invalid JSON. Unlikely to be fixed by retry.
+                status_code = getattr(locals().get('response'), 'status_code', 'N/A')
+                logger.error(f"{log_prefix}: Failed to decode JSON response from {object_info_url} (Status: {status_code}). Error: {e}")
+                try:
+                     # Only log response text if response variable exists and is not None
+                     if 'response' in locals() and response is not None:
+                         logger.error(f"Response text: {response.text[:500]}...") # Log snippet
+                except Exception: pass
+                return None # Definite failure
+
+            except Exception as e:
+                # Catch truly unexpected errors during the request/parsing phase
+                logger.error(f"{log_prefix}: An unexpected error occurred: {e}", exc_info=False) # Set exc_info=True for full traceback if desired
+                traceback.print_exc(file=sys.stderr) # Keep explicit traceback for unexpected errors
+                last_exception = e
+                return None # Unexpected error, stop trying
+
+            # --- Retry Logic ---
+            if not is_last_attempt:
+                logger.info(f"Waiting {current_delay:.2f} seconds before next attempt...")
+                time.sleep(current_delay)
+                current_delay *= 2  # Exponential backoff (e.g., 1s, 2s, 4s, ...)
+
+    # If the loop completes without returning, all attempts failed
+    logger.error(f"Failed to fetch node info from {object_info_url} after {MAX_RETRIES + 1} attempts.")
+    if last_exception:
+        logger.error(f"Last encountered error: {type(last_exception).__name__}: {last_exception}")
+
     return None
 
 # --- Parser Class ---
